@@ -115,6 +115,12 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+button.cl-pricingTableCardFooterButton {
+  background: linear-gradient(to bottom right,  #53DF72, #3DA5F4, #1847E6);
+  border: none;
+  box-shadow: none;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
