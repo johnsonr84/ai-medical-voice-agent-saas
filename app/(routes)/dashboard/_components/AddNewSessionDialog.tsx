@@ -80,7 +80,7 @@ function AddNewSessionDialog() {
             {/* 🔘 Open Dialog Button */}
             <DialogTrigger>
                 <Button
-                    className='mt-3'
+                    className='mt-3 bg-gradient-to-br from-green-400 via-sky-500 to-blue-700'
                     disabled={!paidUser && historyList?.length >= 1} // restrict for free users
                 >
                     + Start a Consultation

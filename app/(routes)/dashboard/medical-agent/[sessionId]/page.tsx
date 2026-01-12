@@ -2,8 +2,8 @@
 
 import axios from 'axios';
 import { useParams, useRouter } from 'next/navigation';
-import React, { useEffect, useState } from 'react';
-import { doctorAgent } from '../../_components/DoctorAgentCard';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { doctorAgent } from '../../_components/DoctorAgentCard';
 import { Circle, Loader, PhoneCall, PhoneOff } from 'lucide-react';
 import Image from 'next/image';
 import { Button } from '@/components/ui/button';
@@ -19,7 +19,8 @@ export type SessionDetail = {
     createdOn: string,
 }
 
-type messages = {
+type Message = {
+    id: string,
     role: string,
     text: string
 }
@@ -35,23 +36,39 @@ function MedicalVoiceAgent() {
     const { sessionId } = useParams(); // Get sessionId from route parameters
     const [sessionDetail, setSessionDetail] = useState<SessionDetail>(); // Current session details
     const [callStarted, setCallStarted] = useState(false); // Call connection status
-    const [vapiInstance, setVapiInstance] = useState<any>(null); // Instance of Vapi for voice interaction
+    const [vapiInstance, setVapiInstance] = useState<Vapi | null>(null); // Instance of Vapi for voice interaction
     const [currentRole, setCurrentRole] = useState<string | null>(null); // Current speaking role (user/assistant)
     const [liveTranscript, setLiveTranscript] = useState<string>(''); // Live transcription text
-    const [messages, setMessages] = useState<messages[]>([]); // Finalized chat messages log
+    const [messages, setMessages] = useState<Message[]>([]); // Finalized chat messages log
     const [loading, setLoading] = useState(false); // Loading state for UI feedback
     const router = useRouter();
+    const vapiHandlersRef = useRef<{
+        callStart: () => void;
+        callEnd: () => void;
+        message: (message: unknown) => void;
+        speechStart: () => void;
+        speechEnd: () => void;
+        error: (err: unknown) => void;
+    } | null>(null);
+
+    const resetCallState = () => {
+        setCallStarted(false);
+        setVapiInstance(null);
+        setCurrentRole(null);
+        setLiveTranscript('');
+        setLoading(false);
+    };
+
+    // Fetch session detail data from backend API
+    const GetSessionDetails = useCallback(async () => {
+        const result = await axios.get(`/api/session-chat?sessionId=${sessionId}`);
+        setSessionDetail(result.data);
+    }, [sessionId]);
 
     // Load session details on component mount or when sessionId changes
     useEffect(() => {
-        if (sessionId) GetSessionDetails();
-    }, [sessionId]);
-
-    // Fetch session detail data from backend API
-    const GetSessionDetails = async () => {
-        const result = await axios.get(`/api/session-chat?sessionId=${sessionId}`);
-        setSessionDetail(result.data);
-    };
+        if (sessionId) void GetSessionDetails();
+    }, [sessionId, GetSessionDetails]);
 
     /**
      * StartCall
@@ -63,7 +80,14 @@ function MedicalVoiceAgent() {
         setLoading(true);
 
         // Initialize Vapi instance with your API key
-        const vapi = new Vapi(process.env.NEXT_PUBLIC_VAPI_API_KEY!);
+        const apiKey = process.env.NEXT_PUBLIC_VAPI_API_KEY;
+        if (!apiKey) {
+            setLoading(false);
+            toast.error('Missing NEXT_PUBLIC_VAPI_API_KEY');
+            return;
+        }
+
+        const vapi = new Vapi(apiKey);
         setVapiInstance(vapi);
 
         // Configuration for the AI voice agent
@@ -71,65 +95,130 @@ function MedicalVoiceAgent() {
             name: 'AI Medical Doctor Voice Agent',
             firstMessage: "Hi there! I’m your AI Medical Assistant. I’m here to help you with any health questions or concerns you might have today. How are you feeling?",
             transcriber: {
-                provider: 'assembly-ai',
-                language: 'en'
+                provider: 'assembly-ai' as const,
+                language: 'en' as const
             },
             voice: {
-                provider: 'playht',
+                provider: 'playht' as const,
                 voiceId: sessionDetail.selectedDoctor?.voiceId ?? 'will'
             },
             model: {
-                provider: 'openai',
-                model: 'gpt-4',
+                provider: 'openai' as const,
+                model: 'gpt-4' as const,
                 messages: [
                     {
-                        role: 'system',
+                        role: 'system' as const,
                         content: sessionDetail.selectedDoctor?.agentPrompt
                     }
                 ]
             }
         };
 
-        //@ts-ignore
-        vapi.start(VapiAgentConfig);
-
-        // Event listeners for Vapi voice call lifecycle
-
-        vapi.on('call-start', () => {
+        // Store handlers so we can unsubscribe (Vapi.off requires the same function reference)
+        const handleCallStart = () => {
             setLoading(false);
             setCallStarted(true);
             console.log('Call started');
-        });
+        };
 
-        vapi.on('call-end', () => {
-            setCallStarted(false);
-            setVapiInstance(null);
+        const handleCallEnd = () => {
+            resetCallState();
+            vapiHandlersRef.current = null;
             console.log('Call ended');
-        });
+        };
 
-        vapi.on('message', (message) => {
-            if (message.type === 'transcript') {
-                const { role, transcriptType, transcript } = message;
+        const handleMessage = (message: unknown) => {
+            const msg = message as {
+                type?: unknown;
+                role?: unknown;
+                transcriptType?: unknown;
+                transcript?: unknown;
+            };
+
+            if (
+                msg?.type === 'transcript' &&
+                typeof msg.role === 'string' &&
+                typeof msg.transcriptType === 'string' &&
+                typeof msg.transcript === 'string'
+            ) {
+                const { role, transcriptType, transcript } = msg;
                 if (transcriptType === 'partial') {
                     // Show live partial transcript while user/assistant is speaking
                     setLiveTranscript(transcript);
                     setCurrentRole(role);
                 } else if (transcriptType === 'final') {
                     // Add finalized transcript to messages log
-                    setMessages((prev) => [...prev, { role, text: transcript }]);
+                    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role, text: transcript }]);
                     setLiveTranscript('');
                     setCurrentRole(null);
                 }
             }
-        });
+        };
 
-        vapi.on('speech-start', () => {
+        const handleSpeechStart = () => {
             setCurrentRole('assistant');
-        });
+        };
 
-        vapi.on('speech-end', () => {
+        const handleSpeechEnd = () => {
             setCurrentRole('user');
-        });
+        };
+
+        const handleError = (err: unknown) => {
+            // Vapi/Daily errors often carry useful nested fields (provider + error message)
+            const e = err as {
+                errorMsg?: unknown;
+                error?: { message?: unknown; errorMsg?: unknown; error?: { message?: unknown } | unknown } | unknown;
+                message?: unknown;
+            };
+            const nested = (e?.error && typeof e.error === 'object')
+                ? (e.error as { errorMsg?: unknown; message?: unknown; error?: { message?: unknown } | unknown })
+                : undefined;
+            const nestedInner = (nested?.error && typeof nested.error === 'object')
+                ? (nested.error as { message?: unknown })
+                : undefined;
+            const msg =
+                (typeof e?.errorMsg === 'string' && e.errorMsg) ||
+                (typeof nested?.errorMsg === 'string' && nested.errorMsg) ||
+                (typeof nested?.message === 'string' && nested.message) ||
+                (typeof nestedInner?.message === 'string' && nestedInner.message) ||
+                (typeof e?.message === 'string' && e.message) ||
+                (typeof err === 'string' ? err : 'Call ended unexpectedly.');
+
+            console.group('Vapi error');
+            console.log('message:', msg);
+            console.log('raw:', err);
+            console.groupEnd();
+
+            resetCallState();
+            vapiHandlersRef.current = null;
+            toast.error(msg);
+        };
+
+        vapiHandlersRef.current = {
+            callStart: handleCallStart,
+            callEnd: handleCallEnd,
+            message: handleMessage,
+            speechStart: handleSpeechStart,
+            speechEnd: handleSpeechEnd,
+            error: handleError,
+        };
+
+        // Event listeners for Vapi voice call lifecycle
+        vapi.on('call-start', handleCallStart);
+        vapi.on('call-end', handleCallEnd);
+        vapi.on('message', handleMessage);
+        vapi.on('speech-start', handleSpeechStart);
+        vapi.on('speech-end', handleSpeechEnd);
+        vapi.on('error', handleError);
+
+        const assistantId = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID;
+        if (assistantId) {
+            // Preferred: use Vapi dashboard assistant config (providers/keys live in Vapi)
+            vapi.start(assistantId);
+        } else {
+            // Inline config requires providers (OpenAI/PlayHT/AssemblyAI) to be configured for your Vapi project
+            vapi.start(VapiAgentConfig);
+        }
     };
 
     /**
@@ -139,20 +228,31 @@ function MedicalVoiceAgent() {
      */
     const endCall = async () => {
         // Generate consultation report based on chat messages
-        const result = await GenerateReport();
+        await GenerateReport();
 
         if (!vapiInstance) return;
 
         // Stop the Vapi call and remove event listeners
-        vapiInstance.stop();
-        vapiInstance.off('call-start');
-        vapiInstance.off('call-end');
-        vapiInstance.off('message');
-        vapiInstance.off('speech-start');
-        vapiInstance.off('speech-end');
+        try {
+            vapiInstance.stop();
+        } catch (e) {
+            // Vapi may throw if the meeting already ended (e.g. "ejection")
+            console.warn('Vapi stop() failed:', e);
+        }
+        try {
+            const handlers = vapiHandlersRef.current;
+            if (handlers) {
+                vapiInstance.off('call-start', handlers.callStart);
+                vapiInstance.off('call-end', handlers.callEnd);
+                vapiInstance.off('message', handlers.message);
+                vapiInstance.off('speech-start', handlers.speechStart);
+                vapiInstance.off('speech-end', handlers.speechEnd);
+                vapiInstance.off('error', handlers.error);
+            }
+        } catch { }
 
-        setCallStarted(false);
-        setVapiInstance(null);
+        resetCallState();
+        vapiHandlersRef.current = null;
 
         toast.success('Your report is generated!');
 
@@ -205,8 +305,8 @@ function MedicalVoiceAgent() {
 
                     {/* Show last 4 finalized messages and live transcript */}
                     <div className='mt-12 overflow-y-auto flex flex-col items-center px-10 md:px-28 lg:px-52 xl:px-72'>
-                        {messages.slice(-4).map((msg, index) => (
-                            <h2 className='text-gray-400 p-2' key={index}>
+                        {messages.slice(-4).map((msg) => (
+                            <h2 className='text-gray-400 p-2' key={msg.id}>
                                 {msg.role}: {msg.text}
                             </h2>
                         ))}
